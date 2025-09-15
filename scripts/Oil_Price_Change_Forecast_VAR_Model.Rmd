@@ -1,5 +1,5 @@
 ---
-title: "Oil Supply & Demand Forecasting - VAR Model"
+title: "Oil Supply, Demand, and Prices Forecasting: Structural VAR Model (1973–2007)"
 author: "Tony Au"
 date: "2025-09-10"
 output:
