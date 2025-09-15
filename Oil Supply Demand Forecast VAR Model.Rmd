@@ -1,0 +1,436 @@
+---
+title: "Oil Supply & Demand Forecasting - VAR Model"
+author: "Tony Au"
+date: "2025-09-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+#rm(list=ls());cat("\014")
+#install.packages("roll")
+suppressPackageStartupMessages(library(quantmod)) 
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(lubridate))   
+suppressPackageStartupMessages(library(dynlm))         # time series regression package 
+suppressPackageStartupMessages(library(strucchange))   # package for testing structural change
+suppressPackageStartupMessages(library(forecast))
+library(tidyverse)
+library(tseries)
+# install.packages("vars")
+library(vars)
+library(readxl)
+```
+
+# 3-variable VAR for (oil supply, global demand, oil price)
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Load the data
+data.oil <- read_xlsx("oildata.xlsx")
+
+# dprod: percent change in global crude oil production
+# rea: changes in freight rates deflated by US CPI (in logs)
+# rpo: real price of oil (in logs)
+
+data.oil <- ts(data.oil[,2:4], start = c(1973,2), end = c(2007,12), frequency = 12 )
+head(data.oil,3)
+tail(data.oil,3)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+
+data.oil <- as.xts(data.oil)
+
+# Plot the series
+autoplot(data.oil) + xlab("") + theme_bw()
+```
+
+## Step 1. VAR lag selection
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+var.info <- VARselect(data.oil, lag.max = 24, type = "const")
+var.info$selection
+```
+
+
+## Step 2. Estimate VAR(24) as in the class example 
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+nlag    <- 24   # lag order for VAR
+var.oil <- VAR(data.oil, p = nlag, type = "const")    
+summary(var.oil)
+```
+
+## Granger causality test
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Bivariate Granger Causality
+grangertest(data.oil$rea,data.oil$dprod,24)
+grangertest(data.oil$rpo,data.oil$dprod,24)
+grangertest(data.oil$dprod,data.oil$rea,24)
+grangertest(data.oil$rpo,data.oil$rea,24)
+grangertest(data.oil$rea,data.oil$rpo,24)
+grangertest(data.oil$dprod,data.oil$rpo,24)
+
+# Multivariate Granger Causality
+causality(var.oil, cause = "dprod", vcov. = sandwich) 
+causality(var.oil, cause = "rea",   vcov. = sandwich) 
+causality(var.oil, cause = "rpo",   vcov. = sandwich) 
+```
+
+## Forcase Error Variance decomposition (FEVD)
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+
+var.oil.fevd <- fevd(var.oil, n.ahead = 24)  
+plot(var.oil.fevd)
+
+# remark: dprod shocks explain only small fractions of "rea" and "rpo"
+```
+
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Impulse responses: recursive order = default (p,u,r)
+irf.dprod <- irf(var.oil, n.ahead = 24, 
+                 ci = 0.95, 
+                 impulse = "dprod", 
+                 response = c("dprod", "rea", "rpo"))
+head(irf.dprod$irf)
+plot(irf.dprod)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+
+irf.rea  <- irf(var.oil, n.ahead = 24, 
+                ci = 0.95, 
+                impulse = "rea", 
+                response = c("dprod", "rea", "rpo"))
+plot(irf.rea)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+irf.rpo  <- irf(var.oil, n.ahead = 24, 
+                 ci = 0.95, 
+                 impulse = "rpo", 
+                 response = c("dprod", "rea", "rpo"))
+plot(irf.rpo)
+```
+
+## Diagnostic tests
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Stability test
+var.oil.break <- stability(var.oil, type = "OLS-CUSUM")
+plot(var.oil.break)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Residual test
+resid1 <- serial.test(var.oil, lags.pt = 24)
+resid1
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# arch test
+arch1 <- arch.test(var.oil, lags.single = 24, lags.multi = 24, multivariate.only = F)
+arch1
+
+arch2 <- arch.test(var.oil, lags.single = 24, lags.multi = 24, multivariate.only = T)
+arch2
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Normality test
+norm1 <- normality.test(var.oil, multivariate.only = F)
+norm1
+
+norm2 <- normality.test(var.oil, multivariate.only = T)
+norm2
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# forecast   
+h <- 36   # forecast horizon
+
+var.oil.pred <- predict(var.oil, n.ahead = h, ci = 0.95)
+#x11(); par(mai=rep(0.5, 4)); fanchart(var.oil.pred)  #open new graph window; plot margin=0.5in all sides
+fanchart(var.oil.pred)
+# example to compare: https://fred.stlouisfed.org/series/POILBREUSDM
+
+```
+
+## Obtain the structural shocks
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Save the reduced-form residuals
+n <- length(data.oil[,1])
+# nlag is lag order
+
+# Extract the residuals
+res <- residuals(var.oil)   # sample size - lag order
+head(res)
+tail(res)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+
+res <- xts(res,order.by = index(data.oil)[-seq(1,nlag)])
+
+# Define the structural shocks from the recursive form's irf function
+# Mapping between reduced-form shocks and standardized structural shocks:
+
+# e1 = sig1*u1
+# e2 = a*u1 + sig2*u2
+# e3 = b*u1 + c*u2 + sig3*u3
+
+# The structural VAR: (Lecture note p.33)
+# y1 = lags + e1 = lags + sig1*u1
+# y2 = lags + e2 = lags + a*u1 + sig2*u2
+# y3 = lags + e3 = lags + b*u1 + c*u2 + sig3*u3
+
+# So the contemporaneous IRF is given by {sig1,sig2,sig3,a,b,c}:
+#  sig1 is the irf of u1 to y1; sig2 is irf of u2 to y2; sig3 is irf of u3 to y3
+#  a is the irf of u1 to y2;  b is the irf of u1 to y3;  c is the irf of u2 to y3
+
+sig1 <- irf.dprod$irf$dprod[1,1]
+a    <- irf.dprod$irf$dprod[1,2]
+b    <- irf.dprod$irf$dprod[1,3]
+
+sig2 <- irf.rea$irf$rea[1,2]
+c    <- irf.rea$irf$rea[1,3]
+
+sig3 <- irf.rpo$irf$rpo[1,3]
+
+# Structural shocks: standardized
+u1 <- res[,1]/sig1
+u2 <- (res[,2] - a*u1)/sig2
+u3 <- (res[,3] - b*u1 - c*u2)/sig3
+
+u <- cbind(u1,u2,u3)
+autoplot(u) + xlab("") + theme_bw()
+```
+
+* Alternative way to recover structural shocks using Cholesky decomposition
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+
+N <- dim(res)[1]
+# n is the total sample size n = N+24
+
+res.var_cov_mat <-  var(res)*(N-1)/(N-25*3)  
+#variance-covariance matrix of reduced-form shocks (omega)
+#Note: The "var()" function computes sample variance which by defaults assumes the degree of freedom is N-1. In our VAR model, the number of parameters is 25*3 (24 lag order and 1 constant term for each equation). So the degree of freedom is N-25*3.
+
+res.chol_mat <- t(chol(res.var_cov_mat)) #lower-triangular matrix of Cholesky decomposition
+                                         #t() means transpose of a matrix
+
+# Comparison
+res.chol_mat%*%t(res.chol_mat);res.var_cov_mat 
+
+u_chol <- solve(res.chol_mat) %*% t(res) #use "solve" to compute the inverse of lower-triangular matrix
+
+u_chol <- t(u_chol)
+
+#Note: The structural shocks obtained by Cholesky decomposition (u_chol) are close to those structural shocks implied by recursive form's irf function (u). The slight differences between u_chol and u are due to the numerical errors when we compute the inverse of lower-triangular matrix.
+data <- xts(u_chol[,1:3], order.by = index(res), unique = FALSE, tzone = "")
+autoplot(data) + xlab("") + theme_bw()
+```
+
+# Implications of structural shocks for macro aggregates
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+
+qlag <- 12   # number of lagged shocks in the OLS regression
+
+# define quarterly average of structural shocks
+ep.q <- endpoints(u,'quarters')
+u.q  <- period.apply(u, INDEX=ep.q, FUN = mean, na.rm=TRUE) # quarter average at quarter-end
+# period.apply(): Apply Function Over Specified Interval
+
+head(u.q)
+tail(u.q)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Subset the real GDP series: 1975 - 2007
+rgdp <- y["1975/2007"]
+names(rgdp) <- "rgdp"
+head(rgdp)
+tail(rgdp)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+index(u.q) <- index(rgdp)  # use quarter-start to denote timing
+data.q <- cbind(rgdp, u.q)
+data.q <- as.ts(data.q)    # package dynlm works only with "ts" objects
+head(data.q)
+tail(data.q)
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# OLS distributed-lags regression
+
+# Distributed-lags regression: Predict current values of a dependent variable based on both the current values 
+# and lagged values of an explanatory variable 
+
+eq1.y <- dynlm(rgdp ~ L(dprod,0:qlag), data = data.q)
+eq2.y <- dynlm(rgdp ~ L(rea,0:qlag),   data = data.q)
+eq3.y <- dynlm(rgdp ~ L(rpo,0:qlag),   data = data.q)
+
+summary(eq1.y)       # first coefficient is intercept
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Define cumulative impulse responses and confidence intervals
+# Cumulative impulse responses: Integrating the impulse response over time
+
+b1  <- cumsum(coef(eq1.y)[2:(qlag+2)])   # The coefficients from t to t-12
+v1  <- vcov(eq1.y)[2:(qlag+2),2:(qlag+2)] # vcov(): Variance-Covariance Matrix
+
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Remark: var(a+b+c) = var(a)+var(b)+var(c)+2cov(a,b)+2cov(b,c)+2cov(a,c)
+# This is the cumsum of the rows and columns or the variance-covariance matrix
+
+# Example of using apply() with cumsum
+# m1 <- matrix(C<-(1:10),nrow=5, ncol=6)
+# apply(m1, 2, cumsum)
+
+vb1 <- apply(apply(v1, 2, cumsum), 1, cumsum)
+sb1 <- sqrt(diag(vb1))   # SE of the cumsum of slope coefficients
+
+# To verify, we may compare
+all.equal(sum(sum(v1[1:3,1:3])), vb1[3,3])
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Plot cumulative impulse responses with +/- SE or 2SE bands
+plot1 <- ggplot(as.data.frame(b1), aes(x = 0:qlag, y = b1)) + 
+  geom_ribbon(aes(ymin = b1 - 2*sb1, ymax = b1 + 2*sb1),
+              fill = "lightgrey") + 
+  geom_ribbon(aes(ymin = b1 - sb1, ymax = b1 + sb1),
+              fill = "grey") + 
+  geom_path(size = 0.6) +    # set the size of the time series line plot 
+  geom_hline(yintercept = 0, linetype = 4, colour = "red") +
+  xlab("") + 
+  ylab("Real GDP") +
+  ggtitle("Crude oil supply shock")
+
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# similarly, we define rgdp's responses to "rea" and "rpo"
+b2  <- cumsum(coef(eq2.y)[2:(qlag+2)])
+v2  <- vcov(eq2.y)[2:(qlag+2),2:(qlag+2)]
+vb2 <- apply(apply(v2, 2, cumsum), 1, cumsum)
+sb2 <- sqrt(diag(vb2))   # SE of the cumsum of slope coefficients
+
+b3  <- cumsum(coef(eq3.y)[2:(qlag+2)])
+v3  <- vcov(eq3.y)[2:(qlag+2),2:(qlag+2)]
+vb3 <- apply(apply(v3, 2, cumsum), 1, cumsum)
+sb3 <- sqrt(diag(vb3))   # SE of the cumsum of slope coefficients
+```
+
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# plot cumulative impulse responses with +/- SE or 2SE bands
+plot2 <- ggplot(as.data.frame(b2), aes(x = 0:qlag, y = b2)) + 
+  geom_ribbon(aes(ymin = b2 - 2*sb2, ymax = b2 + 2*sb2),
+              fill = "lightgrey") + 
+  geom_ribbon(aes(ymin = b2 - sb2, ymax = b2 + sb2),
+              fill = "grey") + 
+  geom_path(size = 0.6) +    # set the size of the time series line plot 
+  geom_hline(yintercept = 0, linetype = 4, colour = "red") +
+  xlab("") + 
+  ylab("Real GDP") +
+  ggtitle("Aggregate demand shock")
+
+plot3 <- ggplot(as.data.frame(b3), aes(x = 0:qlag, y = b3)) + 
+  geom_ribbon(aes(ymin = b3 - 2*sb3, ymax = b3 + 2*sb3),
+              fill = "lightgrey") + 
+  geom_ribbon(aes(ymin = b3 - sb3, ymax = b3 + sb3),
+              fill = "grey") + 
+  geom_path(size = 0.6) +    # set the size of the time series line plot 
+  geom_hline(yintercept = 0, linetype = 4, colour = "red") +
+  xlab("") + 
+  ylab("Real GDP") +
+  ggtitle("Oil-market specific demand shock")
+
+ggarrange(plot1,plot2,plot3, ncol = 1)
+```
+
+## Implications to quarterly inflation
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+
+# head(p)
+ep.q <- endpoints(p,'quarters')
+p.q  <- period.apply(p, INDEX=ep.q, FUN = mean, na.rm=TRUE) # quarter average at quarter-end
+
+# subset the inflation series: 1975 - 2007
+pce <- p.q["1975/2007"]
+names(pce) <- "pce"
+
+# use quarter-start to denote timing
+index(pce) <- index(rgdp)  
+index(u.q) <- index(rgdp)
+
+data.q <- cbind(pce, u.q)
+data.q <- as.ts(data.q)    # package dynlm works only with "ts" objects
+
+# OLS distributed-lags regression
+eq1.y <- dynlm(pce ~ L(dprod,0:qlag), data = data.q)
+eq2.y <- dynlm(pce ~ L(rea,0:qlag),   data = data.q)
+eq3.y <- dynlm(pce ~ L(rpo,0:qlag),   data = data.q)
+
+b4  <- cumsum(coef(eq1.y)[2:(qlag+2)])
+v4  <- vcov(eq1.y)[2:(qlag+2),2:(qlag+2)]
+vb4 <- apply(apply(v4, 2, cumsum), 1, cumsum)
+sb4 <- sqrt(diag(vb4))   # SE of the cumsum of slope coefficients
+
+b5  <- cumsum(coef(eq2.y)[2:(qlag+2)])
+v5  <- vcov(eq2.y)[2:(qlag+2),2:(qlag+2)]
+vb5 <- apply(apply(v5, 2, cumsum), 1, cumsum)
+sb5 <- sqrt(diag(vb5))   # SE of the cumsum of slope coefficients
+
+b6  <- cumsum(coef(eq3.y)[2:(qlag+2)])
+v6  <- vcov(eq3.y)[2:(qlag+2),2:(qlag+2)]
+vb6 <- apply(apply(v6, 2, cumsum), 1, cumsum)
+sb6 <- sqrt(diag(vb6))   # SE of the cumsum of slope coefficients
+
+```
+
+* Plot cumulative impulse responses with +/- SE or 2SE bands
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+
+plot4 <- ggplot(as.data.frame(b4), aes(x = 0:qlag, y = b4)) + 
+  geom_ribbon(aes(ymin = b4 - 2*sb4, ymax = b4 + 2*sb4),
+              fill = "lightgrey") + 
+  geom_ribbon(aes(ymin = b4 - sb4, ymax = b4 + sb4),
+              fill = "grey") + 
+  geom_path(size = 0.6) +    # set the size of the time series line plot 
+  geom_hline(yintercept = 0, linetype = 4, colour = "red") +
+  xlab("") + 
+  ylab("PCE Inflation") +
+  ggtitle("Crude oil supply shock")
+
+plot5 <- ggplot(as.data.frame(b5), aes(x = 0:qlag, y = b5)) + 
+  geom_ribbon(aes(ymin = b5 - 2*sb5, ymax = b5 + 2*sb5),
+              fill = "lightgrey") + 
+  geom_ribbon(aes(ymin = b5 - sb5, ymax = b5 + sb5),
+              fill = "grey") + 
+  geom_path(size = 0.6) +    # set the size of the time series line plot 
+  geom_hline(yintercept = 0, linetype = 4, colour = "red") +
+  xlab("") + 
+  ylab("PCE Inflation") +
+  ggtitle("Aggregate demand shock")
+
+plot6 <- ggplot(as.data.frame(b6), aes(x = 0:qlag, y = b6)) + 
+  geom_ribbon(aes(ymin = b6 - 2*sb6, ymax = b6 + 2*sb6),
+              fill = "lightgrey") + 
+  geom_ribbon(aes(ymin = b6 - sb6, ymax = b6 + sb6),
+              fill = "grey") + 
+  geom_path(size = 0.6) +    # set the size of the time series line plot 
+  geom_hline(yintercept = 0, linetype = 4, colour = "red") +
+  xlab("") + 
+  ylab("PCE inflation") +
+  ggtitle("Oil-market specific demand shock")
+
+ggarrange(plot1, plot4, plot2, plot5, plot3, plot6, nrow = 3, ncol = 2)
+
+```
+
+
