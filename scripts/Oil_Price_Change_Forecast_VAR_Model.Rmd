@@ -2,30 +2,37 @@
 title: "Oil Supply & Demand Forecasting - VAR Model"
 author: "Tony Au"
 date: "2025-09-10"
-output: html_document
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+# Introduction
+This report analyzes the dynamics of global crude oil supply, demand, and prices using a Vector Autoregression (VAR) model. The variables considered are the percent change in global crude oil production (`dprod`), changes in freight rates deflated by US CPI (`rea`), and the real price of oil (`rpo`). The goal is to forecast oil price changes and understand the impact of structural shocks on macroeconomic indicators like real GDP and inflation.
+
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
-#rm(list=ls());cat("\014")
-#install.packages("roll")
-suppressPackageStartupMessages(library(quantmod)) 
-suppressPackageStartupMessages(library(ggpubr))
-suppressPackageStartupMessages(library(lubridate))   
-suppressPackageStartupMessages(library(dynlm))         # time series regression package 
-suppressPackageStartupMessages(library(strucchange))   # package for testing structural change
-suppressPackageStartupMessages(library(forecast))
-library(tidyverse)
-library(tseries)
-# install.packages("vars")
-library(vars)
-library(readxl)
+rm(list=ls())
+# install.packages("vars")  # Install once if needed
+# install.packages("roll")
+suppressPackageStartupMessages(library(quantmod))  # Data download (FRED) and xts helpers
+suppressPackageStartupMessages(library(ggpubr))    # Plot arrangements
+suppressPackageStartupMessages(library(lubridate)) # Date utilities
+suppressPackageStartupMessages(library(dynlm))     # Time-series OLS with L() lag operator
+suppressPackageStartupMessages(library(strucchange)) # Stability tests (CUSUM)
+suppressPackageStartupMessages(library(forecast))  # fanchart and forecasting utils
+library(tidyverse)  # ggplot2 and data wrangling
+library(tseries)    # Time-series tests
+library(vars)       # VAR estimation, IRF, FEVD, diagnostics
+library(readxl)     # Read Excel input (oildata.xlsx)
 ```
 
 # 3-variable VAR for (oil supply, global demand, oil price)
+This section builds the monthly dataset, converts to time-series objects, and visualizes the series. We treat dprod as supply, rea as global demand proxy, and rpo as real oil price. Monthly frequency is set to 12 for consistent lagging and diagnostics.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Load the data
 data.oil <- read_xlsx("oildata.xlsx")
@@ -48,53 +55,59 @@ autoplot(data.oil) + xlab("") + theme_bw()
 ```
 
 ## Step 1. VAR lag selection
-```{r eval=TRUE, warning=FALSE,message=FALSE}
-var.info <- VARselect(data.oil, lag.max = 24, type = "const")
-var.info$selection
+We choose the VAR lag length by minimizing information criteria (AIC, HQ, SC, FPE). Longer lags capture richer dynamics but reduce degrees of freedom.
+```{r eval=TRUE, message=FALSE, warning=FALSE}
+var.info <- VARselect(data.oil, lag.max = 24, type = "const")  # IC-based lag selection up to 24
+var.info$selection  # Shows optimal lags by AIC, HQ, SC, FPE
 ```
 
-
 ## Step 2. Estimate VAR(24) as in the class example 
+The VAR(p) system is Yt = c + A1Yt−1 + … + ApYt−p + εt, with εt ~ N(0, Σ). We estimate with OLS equation-by-equation, which is efficient under identical regressors.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
-nlag    <- 24   # lag order for VAR
-var.oil <- VAR(data.oil, p = nlag, type = "const")    
-summary(var.oil)
+nlag    <- 24   # Chosen lag order (can compare with var.info results)
+var.oil <- VAR(data.oil, p = nlag, type = "const")    # Estimate VAR(p) with constant
+summary(var.oil)  # Obtain coefficients, SEs, R^2 per equation
 ```
 
 ## Granger causality test
+Granger causality tests whether lagged X improves prediction of Y beyond Y’s own lags. Bivariate tests use pairs; multivariate tests condition on the full system.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Bivariate Granger Causality
-grangertest(data.oil$rea,data.oil$dprod,24)
-grangertest(data.oil$rpo,data.oil$dprod,24)
-grangertest(data.oil$dprod,data.oil$rea,24)
-grangertest(data.oil$rpo,data.oil$rea,24)
-grangertest(data.oil$rea,data.oil$rpo,24)
-grangertest(data.oil$dprod,data.oil$rpo,24)
+grangertest(data.oil$rea,data.oil$dprod,24)  # Does dprod → rea?
+grangertest(data.oil$rpo,data.oil$dprod,24)  # Does dprod → rpo?
+grangertest(data.oil$dprod,data.oil$rea,24)  # Does rea → dprod?
+grangertest(data.oil$rpo,data.oil$rea,24)    # Does rea → rpo?
+grangertest(data.oil$rea,data.oil$rpo,24)    # Does rpo → rea?
+grangertest(data.oil$dprod,data.oil$rpo,24)  # Does rpo → dprod?
 
-# Multivariate Granger Causality
-causality(var.oil, cause = "dprod", vcov. = sandwich) 
-causality(var.oil, cause = "rea",   vcov. = sandwich) 
-causality(var.oil, cause = "rpo",   vcov. = sandwich) 
+# Multivariate Granger Causality (conditions on the whole VAR)
+causality(var.oil, cause = "dprod", vcov. = sandwich)  # H0: lags of dprod don't help explain others
+causality(var.oil, cause = "rea",   vcov. = sandwich)
+causality(var.oil, cause = "rpo",   vcov. = sandwich)
 ```
+Global demand (rea) helps predict future oil production (dprod) at conventional levels (p≈0.004), while other bivariate links are weak or insignificant. However, once we condition on the full VAR (multivariate Granger tests), all three variables—production, demand, and the real oil price—contain predictive information for the others (p<1%), indicating meaningful feedback among them. Instantaneous-causality p‑values are not significant, so there’s no strong evidence of same‑period effects after controlling for lags, which is consistent with using a recursive (Cholesky) identification. 
+
+In plain language: demand, supply, and prices evolve jointly, each helping to forecast the others over time, with demand’s predictive role most evident in the pairwise tests.
 
 ## Forcase Error Variance decomposition (FEVD)
+Forecast Error Variance Decomposition attributes the h‑step forecast error variance of each variable to shocks from all variables under the identification scheme.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
-
-var.oil.fevd <- fevd(var.oil, n.ahead = 24)  
+var.oil.fevd <- fevd(var.oil, n.ahead = 24)   # Share of forecast error variance by shock at horizons
 plot(var.oil.fevd)
 
 # remark: dprod shocks explain only small fractions of "rea" and "rpo"
 ```
 
-
+# Impulse responses function (IRF)
+IRFs trace the effect of a one‑unit structural shock over time. With recursive (Cholesky) identification, the variable order implies contemporaneous causal ordering.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Impulse responses: recursive order = default (p,u,r)
 irf.dprod <- irf(var.oil, n.ahead = 24, 
                  ci = 0.95, 
                  impulse = "dprod", 
-                 response = c("dprod", "rea", "rpo"))
+                 response = c("dprod", "rea", "rpo"))  # Responses to a supply shock
 head(irf.dprod$irf)
-plot(irf.dprod)
+plot(irf.dprod)  # Bands reflect 95% CI
 ```
 
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
@@ -115,15 +128,16 @@ plot(irf.rpo)
 ```
 
 ## Diagnostic tests
+We check stability (CUSUM), serial correlation (Portmanteau), conditional heteroskedasticity (ARCH), and normality to validate VAR assumptions.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Stability test
-var.oil.break <- stability(var.oil, type = "OLS-CUSUM")
+var.oil.break <- stability(var.oil, type = "OLS-CUSUM")  # Detects parameter instability
 plot(var.oil.break)
 ```
 
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Residual test
-resid1 <- serial.test(var.oil, lags.pt = 24)
+resid1 <- serial.test(var.oil, lags.pt = 24)  # Portmanteau test for autocorrelation
 resid1
 ```
 
@@ -138,25 +152,26 @@ arch2
 
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Normality test
-norm1 <- normality.test(var.oil, multivariate.only = F)
+norm1 <- normality.test(var.oil, multivariate.only = F)  # Jarque-Bera type
 norm1
 
 norm2 <- normality.test(var.oil, multivariate.only = T)
 norm2
 ```
 
+# forecast
+We produce multi‑step VAR forecasts and visualize uncertainty via fan charts (approximate ±kσ intervals).
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
-# forecast   
 h <- 36   # forecast horizon
 
-var.oil.pred <- predict(var.oil, n.ahead = h, ci = 0.95)
+var.oil.pred <- predict(var.oil, n.ahead = h, ci = 0.95) # Multi-step VAR forecast 
 #x11(); par(mai=rep(0.5, 4)); fanchart(var.oil.pred)  #open new graph window; plot margin=0.5in all sides
 fanchart(var.oil.pred)
 # example to compare: https://fred.stlouisfed.org/series/POILBREUSDM
-
 ```
 
 ## Obtain the structural shocks
+Structural shocks u are recovered from reduced‑form residuals ε via ε = B0 u, where B0 is lower‑triangular under recursive identification. We recover B0 from contemporaneous IRFs.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Save the reduced-form residuals
 n <- length(data.oil[,1])
@@ -188,31 +203,31 @@ res <- xts(res,order.by = index(data.oil)[-seq(1,nlag)])
 #  sig1 is the irf of u1 to y1; sig2 is irf of u2 to y2; sig3 is irf of u3 to y3
 #  a is the irf of u1 to y2;  b is the irf of u1 to y3;  c is the irf of u2 to y3
 
-sig1 <- irf.dprod$irf$dprod[1,1]
-a    <- irf.dprod$irf$dprod[1,2]
-b    <- irf.dprod$irf$dprod[1,3]
+sig1 <- irf.dprod$irf$dprod[1,1]  # contemporaneous IRF of y1 to u1 (σ1)
+a    <- irf.dprod$irf$dprod[1,2]  # contemporaneous effect of u1 on y2 (a)
+b    <- irf.dprod$irf$dprod[1,3]  # contemporaneous effect of u1 on y3 (b)
 
-sig2 <- irf.rea$irf$rea[1,2]
-c    <- irf.rea$irf$rea[1,3]
+sig2 <- irf.rea$irf$rea[1,2]      # σ2
+c    <- irf.rea$irf$rea[1,3]      # contemporaneous effect of u2 on y3 (c)
 
-sig3 <- irf.rpo$irf$rpo[1,3]
+sig3 <- irf.rpo$irf$rpo[1,3]      # σ3
 
-# Structural shocks: standardized
-u1 <- res[,1]/sig1
-u2 <- (res[,2] - a*u1)/sig2
-u3 <- (res[,3] - b*u1 - c*u2)/sig3
+# Structural shocks: standardized (solve ε = B0 u for u)
+u1 <- res[,1]/sig1                        # u1 = ε1/σ1
+u2 <- (res[,2] - a*u1)/sig2               # u2 = (ε2 − a u1)/σ2
+u3 <- (res[,3] - b*u1 - c*u2)/sig3        # u3 = (ε3 − b u1 − c u2)/σ3
 
 u <- cbind(u1,u2,u3)
 autoplot(u) + xlab("") + theme_bw()
 ```
 
 * Alternative way to recover structural shocks using Cholesky decomposition
+Direct Cholesky: Σ = PP′ with P lower‑triangular. Then u = P^{-1} ε. We adjust degrees of freedom when estimating Σ.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
-
 N <- dim(res)[1]
 # n is the total sample size n = N+24
 
-res.var_cov_mat <-  var(res)*(N-1)/(N-25*3)  
+res.var_cov_mat <-  var(res)*(N-1)/(N-25*3)  # DoF-adjusted Σ̂ for reduced-form shocks
 #variance-covariance matrix of reduced-form shocks (omega)
 #Note: The "var()" function computes sample variance which by defaults assumes the degree of freedom is N-1. In our VAR model, the number of parameters is 25*3 (24 lag order and 1 constant term for each equation). So the degree of freedom is N-25*3.
 
@@ -220,11 +235,11 @@ res.chol_mat <- t(chol(res.var_cov_mat)) #lower-triangular matrix of Cholesky de
                                          #t() means transpose of a matrix
 
 # Comparison
-res.chol_mat%*%t(res.chol_mat);res.var_cov_mat 
+res.chol_mat%*%t(res.chol_mat);res.var_cov_mat # Verify Σ̂ ≈ P P¸′
 
 u_chol <- solve(res.chol_mat) %*% t(res) #use "solve" to compute the inverse of lower-triangular matrix
 
-u_chol <- t(u_chol)
+u_chol <- t(u_chol)# Conform dimensions (time × shocks)
 
 #Note: The structural shocks obtained by Cholesky decomposition (u_chol) are close to those structural shocks implied by recursive form's irf function (u). The slight differences between u_chol and u are due to the numerical errors when we compute the inverse of lower-triangular matrix.
 data <- xts(u_chol[,1:3], order.by = index(res), unique = FALSE, tzone = "")
@@ -232,12 +247,12 @@ autoplot(data) + xlab("") + theme_bw()
 ```
 
 # Implications of structural shocks for macro aggregates
+We aggregate monthly shocks to quarter averages and run distributed‑lag OLS to estimate cumulative effects on real GDP and inflation.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
-
 qlag <- 12   # number of lagged shocks in the OLS regression
 
 # define quarterly average of structural shocks
-ep.q <- endpoints(u,'quarters')
+ep.q <- endpoints(u,'quarters') # Quarter endpoints in xts index
 u.q  <- period.apply(u, INDEX=ep.q, FUN = mean, na.rm=TRUE) # quarter average at quarter-end
 # period.apply(): Apply Function Over Specified Interval
 
@@ -245,9 +260,17 @@ head(u.q)
 tail(u.q)
 ```
 
-```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Subset the real GDP series: 1975 - 2007
-rgdp <- y["1975/2007"]
+We fetch GDPC1 from FRED, convert to quarterly, align dates, and keep 1975–2007 for comparability with oil data.
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Load Real GDP Data from FRED
+# Fetch US Real GDP data (GDPC1) from FRED
+getSymbols("GDPC1", src = "FRED", from = "1970-01-01", to = "2010-12-31")
+y <- GDPC1
+# Convert to quarterly data if needed and subset to 1975-2007
+y <- to.quarterly(y, name = "rgdp") # OHLC format; 4th column is Close
+
+rgdp <- y["1975/2007"][,4] # Keep 'Close' column as level for quarter-end
 names(rgdp) <- "rgdp"
 head(rgdp)
 tail(rgdp)
@@ -261,26 +284,25 @@ head(data.q)
 tail(data.q)
 ```
 
-```{r eval=TRUE, warning=FALSE,message=FALSE}
 # OLS distributed-lags regression
+The regression rgdp_t = α + Σ_{k=0}^{12} β_k shock_{t−k} + e_t. Cumulative IR = Σ_{j=0}^{h} β_j.
+```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Distributed-lags regression: Predict current values of a dependent variable based on both the current values and lagged values of an explanatory variable 
 
-# Distributed-lags regression: Predict current values of a dependent variable based on both the current values 
-# and lagged values of an explanatory variable 
-
-eq1.y <- dynlm(rgdp ~ L(dprod,0:qlag), data = data.q)
-eq2.y <- dynlm(rgdp ~ L(rea,0:qlag),   data = data.q)
-eq3.y <- dynlm(rgdp ~ L(rpo,0:qlag),   data = data.q)
+eq1.y <- dynlm(rgdp ~ L(dprod,0:qlag), data = data.q)  # rgdp on supply shock lags
+eq2.y <- dynlm(rgdp ~ L(rea,0:qlag),   data = data.q)  # rgdp on global demand shock lags
+eq3.y <- dynlm(rgdp ~ L(rpo,0:qlag),   data = data.q)  # rgdp on oil-specific demand shock lags
 
 summary(eq1.y)       # first coefficient is intercept
 ```
 
-```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Define cumulative impulse responses and confidence intervals
+We compute cumulative sums of β̂ and their standard errors using the cumulative variance formula var(Σ β̂) = 1′ V 1 with cumulative summation.
+```{r eval=TRUE, warning=FALSE,message=FALSE}
 # Cumulative impulse responses: Integrating the impulse response over time
 
-b1  <- cumsum(coef(eq1.y)[2:(qlag+2)])   # The coefficients from t to t-12
-v1  <- vcov(eq1.y)[2:(qlag+2),2:(qlag+2)] # vcov(): Variance-Covariance Matrix
-
+b1  <- cumsum(coef(eq1.y)[2:(qlag+2)])   # The coefficients from t to t-12 (\nabla_h = Σ_{j=0}^{h} β̂_j (exclude intercept))
+v1  <- vcov(eq1.y)[2:(qlag+2),2:(qlag+2)] # V = Var(β̂_{0..12}; vcov(): Variance-Covariance Matrix
 ```
 
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
@@ -291,11 +313,11 @@ v1  <- vcov(eq1.y)[2:(qlag+2),2:(qlag+2)] # vcov(): Variance-Covariance Matrix
 # m1 <- matrix(C<-(1:10),nrow=5, ncol=6)
 # apply(m1, 2, cumsum)
 
-vb1 <- apply(apply(v1, 2, cumsum), 1, cumsum)
+vb1 <- apply(apply(v1, 2, cumsum), 1, cumsum) # Cumulative variance of cumulative sums
 sb1 <- sqrt(diag(vb1))   # SE of the cumsum of slope coefficients
 
 # To verify, we may compare
-all.equal(sum(sum(v1[1:3,1:3])), vb1[3,3])
+all.equal(sum(sum(v1[1:3,1:3])), vb1[3,3]) # Simple check for h=3 case
 ```
 
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
@@ -354,9 +376,18 @@ ggarrange(plot1,plot2,plot3, ncol = 1)
 ```
 
 ## Implications to quarterly inflation
+We construct monthly PCE inflation as 100·Δlog(PCEPI), aggregate to quarters, align with shocks, and estimate distributed‑lag effects on PCE inflation.
 ```{r eval=TRUE, warning=FALSE,message=FALSE}
+# Load PCE Inflation Data from FRED
 
-# head(p)
+# Fetch US PCE Price Index data (PCEPI) from FRED
+getSymbols("PCEPI", src = "FRED", from = "1970-01-01", to = "2010-12-31")
+p <- PCEPI
+# Convert to monthly percent change to represent inflation rate
+p <- diff(log(p)) * 100 # π_t = 100·[log(P_t) − log(P_{t−1})]
+# Convert to xts object if needed for endpoints function
+p <- as.xts(p)
+
 ep.q <- endpoints(p,'quarters')
 p.q  <- period.apply(p, INDEX=ep.q, FUN = mean, na.rm=TRUE) # quarter average at quarter-end
 
@@ -372,9 +403,10 @@ data.q <- cbind(pce, u.q)
 data.q <- as.ts(data.q)    # package dynlm works only with "ts" objects
 
 # OLS distributed-lags regression
-eq1.y <- dynlm(pce ~ L(dprod,0:qlag), data = data.q)
-eq2.y <- dynlm(pce ~ L(rea,0:qlag),   data = data.q)
-eq3.y <- dynlm(pce ~ L(rpo,0:qlag),   data = data.q)
+eq1.y <- dynlm(pce ~ L(dprod,0:qlag), data = data.q)  # Inflation on supply shock lags
+eq2.y <- dynlm(pce ~ L(rea,0:qlag),   data = data.q)  # Inflation on aggregate demand shock lags
+eq3.y <- dynlm(pce ~ L(rpo,0:qlag),   data = data.q)  # Inflation on oil-specific demand shock lags
+
 
 b4  <- cumsum(coef(eq1.y)[2:(qlag+2)])
 v4  <- vcov(eq1.y)[2:(qlag+2),2:(qlag+2)]
@@ -390,7 +422,6 @@ b6  <- cumsum(coef(eq3.y)[2:(qlag+2)])
 v6  <- vcov(eq3.y)[2:(qlag+2),2:(qlag+2)]
 vb6 <- apply(apply(v6, 2, cumsum), 1, cumsum)
 sb6 <- sqrt(diag(vb6))   # SE of the cumsum of slope coefficients
-
 ```
 
 * Plot cumulative impulse responses with +/- SE or 2SE bands
@@ -433,4 +464,6 @@ ggarrange(plot1, plot4, plot2, plot5, plot3, plot6, nrow = 3, ncol = 2)
 
 ```
 
-
+# Conclusion
+The results indicate that aggregate demand shocks are the dominant driver of macro outcomes: they lift both real GDP and PCE inflation strongly and persistently. Oil‑market–specific demand shocks, by contrast, are stagflationary—reducing real GDP while pushing inflation higher. Pure oil supply shocks (increased production) have comparatively modest and less persistent effects on both variables, with responses often near zero initially and remaining small relative to demand‑driven movements.
+Further work should extend the sample through the present, test alternative identification schemes (different Cholesky orderings, sign restrictions, or external instruments for oil supply), evaluate robustness to lag length and stability/breaks (e.g., 1986, 2008, 2014), consider richer models (SVAR, BVAR, or time‑varying parameter VAR), incorporate additional controls (monetary policy, financial conditions, global activity indices), and perform out‑of‑sample forecast evaluation against benchmarks; examining core PCE inflation and alternative activity measures would also strengthen the conclusions.
