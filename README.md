@@ -21,7 +21,6 @@ The project follows the methodology of Kilian (2009) and applies a 3-variable VA
 ├── scripts/ # main R code
 ├── results/ # figures, tables, model outputs
 ├── README.md # project documentation
-├── LICENSE # license file
 └── requirements.txt # required R packages
 ```
 
