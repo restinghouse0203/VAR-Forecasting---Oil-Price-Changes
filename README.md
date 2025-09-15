@@ -16,12 +16,14 @@ The project follows the methodology of Kilian (2009) and applies a 3-variable VA
 6. Study the macroeconomic implications of structural oil shocks for **GDP** and **inflation**.
 
 ## Repository Structure
+'''
 ├── data/ # input datasets (Excel, CSV, etc.)
 ├── scripts/ # main R code
 ├── results/ # figures, tables, model outputs
 ├── README.md # project documentation
 ├── LICENSE # license file
 └── requirements.txt # required R packages
+'''
 
 ## Requirements
 The following R packages are required:
